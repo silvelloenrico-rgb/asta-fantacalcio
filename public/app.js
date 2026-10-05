@@ -632,6 +632,7 @@ function adminView() {
     <div style="flex:1 1 100%;min-width:0"><div class="name">${esc(u.name)} ${u.is_admin ? '<span class="small" style="color:var(--accent)">admin</span>' : ''}</div><div class="sub">${esc(u.email)} · ${u.subs ? '🔔 notifiche attive' : '🔕 notifiche spente'}</div></div>
     <select data-userteam="${u.id}" style="flex:1;min-width:0;min-height:36px;padding:4px 8px"><option value="">— nessuna —</option>${S.teams.map((t) => `<option value="${t.id}" ${u.team_id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
     <button class="btn sm" data-resetpw="${u.id}">Password</button>
+    ${u.email !== 'silvello.enrico@gmail.com' ? `<button class="btn sm ${u.is_admin ? 'danger' : ''}" data-toggleadmin="${u.id}">${u.is_admin ? 'Togli admin' : 'Rendi admin'}</button>` : ''}
     ${u.email !== 'silvello.enrico@gmail.com' ? `<button class="btn sm danger" data-deluser="${u.id}">✕</button>` : ''}
   </div>`).join('') || '<div class="empty">Nessun iscritto</div>'}</div>
   <p class="small muted">Condividi il link dell'app: ognuno si iscrive e sceglie la propria squadra. Per chi non si iscrive puoi giocare tu con “Agisci come”.</p>
@@ -702,7 +703,7 @@ async function exportRose() {
 
 // ---------------- events ----------------
 document.addEventListener('click', async (e) => {
-  const el = e.target.closest('[data-tab],[data-a],[data-auth],[data-pick],[data-role],[data-call],[data-raise],[data-team],[data-trade],[data-trade-accept],[data-trade-reject],[data-trade-cancel],[data-release],[data-admin],[data-admin-cancel-trade],[data-force-withdraw],[data-saveteam],[data-move],[data-resetpw],[data-deluser],[data-claim],[data-moveteam]');
+  const el = e.target.closest('[data-tab],[data-a],[data-auth],[data-pick],[data-role],[data-call],[data-raise],[data-team],[data-trade],[data-trade-accept],[data-trade-reject],[data-trade-cancel],[data-release],[data-admin],[data-admin-cancel-trade],[data-force-withdraw],[data-saveteam],[data-move],[data-resetpw],[data-deluser],[data-claim],[data-moveteam],[data-toggleadmin]');
   if (!el || el.disabled) return;
   const d = el.dataset;
   if (d.tab !== undefined) { e.preventDefault(); closeModal(); ui.tab = d.tab; ui.teamView = null; location.hash = d.tab; render(); window.scrollTo(0, 0); return; }
@@ -737,6 +738,11 @@ document.addEventListener('click', async (e) => {
     return openModal(`<h3>Nuova password per ${esc(u.name)}</h3><label class="f"><span>Password (min 6)</span><input type="text" id="npw" value="${Math.random().toString(36).slice(2, 10)}"></label><p class="small muted">Comunicala tu all'allenatore.</p><div class="row"><button class="btn ghost grow" data-close>Annulla</button><button class="btn primary grow" id="dopw">Imposta</button></div>`, (m) => {
       m.querySelector('#dopw').onclick = async () => { const r = await admin('user_reset_password', { user_id: u.id, password: m.querySelector('#npw').value }, 'Password aggiornata'); if (r) closeModal(); };
     });
+  }
+  if (d.toggleadmin) {
+    const u = S.users.find((x) => x.id === +d.toggleadmin);
+    return confirmModal(u.is_admin ? `Togliere i permessi di admin a ${esc(u.name)}?` : `Rendere ${esc(u.name)} admin? Potrà gestire file, regole, turni e utenti come te.`,
+      () => admin('user_update', { user_id: u.id, is_admin: !u.is_admin }, u.is_admin ? 'Permessi admin tolti' : `${u.name} ora è admin`), u.is_admin ? 'Togli admin' : 'Rendi admin', !!u.is_admin);
   }
   if (d.deluser) { const u = S.users.find((x) => x.id === +d.deluser); return confirmModal(`Eliminare l'account di ${esc(u.name)}?`, () => admin('user_delete', { user_id: u.id }), 'Elimina', true); }
 

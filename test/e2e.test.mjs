@@ -120,6 +120,18 @@ await api('admin', '/api/admin', { type: 'skip_turn' });
 st = await api('admin', '/api/state');
 ok(st.settings.phase === 'finished', 'senza più cambi l\'asta termina da sola');
 
+console.log('Admin aggiuntivi');
+const coach1 = st.users.find((u) => u.email === 'coach1@esempio.it');
+await rejects(api('u1', '/api/admin', { type: 'pause' }), 'un allenatore normale non può usare il cockpit');
+await api('admin', '/api/admin', { type: 'user_update', user_id: coach1.id, is_admin: true });
+ok((await api('u1', '/api/state')).me.is_admin === true, 'l\'admin nomina un altro admin');
+await api('u1', '/api/admin', { type: 'set_order', team_ids: st.teams.map((t) => t.id) });
+ok(true, 'il nuovo admin può usare il cockpit');
+const main = st.users.find((u) => u.email === ADMIN.email);
+await rejects(api('u1', '/api/admin', { type: 'user_update', user_id: main.id, is_admin: false }), 'l\'admin principale non può essere revocato');
+await api('admin', '/api/admin', { type: 'user_update', user_id: coach1.id, is_admin: false });
+await rejects(api('u1', '/api/admin', { type: 'pause' }), 'admin revocato: niente più cockpit');
+
 console.log('Notifiche (registrazione)');
 await api('u0', '/api/push/subscribe', { endpoint: 'https://example.invalid/push/1', keys: { p256dh: 'BOr3jEk3VUe3ccxw3c0hXk7nbHq1RTWv7Xx2JzOq3P1LqSPq6R0h2zJ0yQq7v3Hk0gT0j1J9mXn6c8ZP3x1y2nM', auth: 'c2VjcmV0c2VjcmV0MTIz' } });
 const pt = await api('u0', '/api/push/test', {});

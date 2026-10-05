@@ -56,7 +56,7 @@ Chiunque si iscrive con email, nome e password e sceglie **una squadra libera**:
 È lo storico di **acquisti, svincoli e scambi** per squadra (tabella `moves`). I nomi dei giocatori vengono copiati nel movimento, perché i loro id cambiano quando si ricalcolano gli svincolati. In app si possono filtrare per squadra, con un riepilogo per ciascuna (numero di acquisti e spesa, svincoli e rimborsi, scambi, crediti, cambi rimasti).
 
 ### 2.8 Funzioni admin
-"Agisci come" (l'admin gioca per una qualunque squadra con il parametro `as_team`), ritiro forzato, aggiudica subito, annulla asta, salta turno, assegna turno, correzione manuale (sposta un giocatore senza toccare i crediti), modifica di crediti e cambi per squadra, gestione utenti (squadra, reset password, eliminazione), esportazione delle rose in .xlsx nello stesso formato del file Rose, azzeramento totale (gli account restano).
+"Agisci come" (l'admin gioca per una qualunque squadra con il parametro `as_team`), ritiro forzato, aggiudica subito, annulla asta, salta turno, assegna turno, correzione manuale (sposta un giocatore senza toccare i crediti), modifica di crediti e cambi per squadra, gestione utenti (squadra, reset password, eliminazione, **nomina o revoca di altri admin**: un admin nominato ha gli stessi poteri, l'admin principale `ADMIN_EMAIL` non può essere revocato né eliminato), esportazione delle rose in .xlsx nello stesso formato del file Rose, azzeramento totale (gli account restano).
 
 ## 3. Struttura dei file
 
@@ -71,7 +71,7 @@ Chiunque si iscrive con email, nome e password e sceglie **una squadra libera**:
 | `public/xlsx-parse.js` | Lettura dei file Rose e Listone (lo stesso codice gira nel browser e nei test). SheetJS si carica da cdnjs solo quando serve. |
 | `public/sw.js` | Service worker: mostra le notifiche, apre o mette a fuoco l'app al tocco, gestisce `pushsubscriptionchange`. |
 | `public/manifest.webmanifest`, icone | PWA installabile (necessaria per le notifiche su iPhone). |
-| `test/` | `push.test.mjs` (crittografia e VAPID), `e2e.test.mjs` (35 controlli sulle regole), `ui.test.mjs` (Playwright, due telefoni in tempo reale), `fixtures/` con file Excel di esempio. |
+| `test/` | `push.test.mjs` (crittografia e VAPID), `e2e.test.mjs` (40 controlli sulle regole), `ui.test.mjs` (Playwright, due telefoni in tempo reale), `fixtures/` con file Excel di esempio. |
 
 ## 4. Architettura e concorrenza
 
@@ -127,7 +127,7 @@ Autenticazione: cookie di sessione `sid` (HttpOnly, SameSite=Lax, Secure in HTTP
 
 **Azioni (`/api/action`):** `call {player_id, amount}`, `raise {amount}`, `withdraw`, `pass`, `release {player_id}`, `trade_propose {offered_player_id, requested_player_id, credits, note}`, `trade_accept {trade_id}`, `trade_reject {trade_id}`, `trade_cancel {trade_id}`.
 
-**Comandi admin (`/api/admin`):** `import_rose {teams:[{name,credits,players:[{name,club,role,cost}]}]}`, `import_listone {players:[{name,club,role,quotazione}]}` (alias storico `import_svincolati`), `settings {settings:{...}, apply_cambi_all?}`, `team_update {team_id, credits?, cambi_max?, cambi_used?, scambi_used?}`, `set_order {team_ids:[...]}`, `start`, `pause`, `resume`, `finish`, `skip_turn`, `set_turn {team_id}`, `force_withdraw {team_id}`, `close_auction`, `cancel_auction`, `cancel_trade {trade_id}`, `force_release {player_id}`, `move_player {player_id, team_id?, cost?}`, `user_update {user_id, team_id?, is_admin?}`, `user_reset_password {user_id, password}`, `user_delete {user_id}`, `reset_all`.
+**Comandi admin (`/api/admin`):** `import_rose {teams:[{name,credits,players:[{name,club,role,cost}]}]}`, `import_listone {players:[{name,club,role,quotazione}]}` (alias storico `import_svincolati`), `settings {settings:{...}, apply_cambi_all?}`, `team_update {team_id, credits?, cambi_max?, cambi_used?, scambi_used?}`, `set_order {team_ids:[...]}`, `start`, `pause`, `resume`, `finish`, `skip_turn`, `set_turn {team_id}`, `force_withdraw {team_id}`, `close_auction`, `cancel_auction`, `cancel_trade {trade_id}`, `force_release {player_id}`, `move_player {player_id, team_id?, cost?}`, `user_update {user_id, team_id?, is_admin?}` (`is_admin` nomina/revoca un admin; rifiutato sull'admin principale), `user_reset_password {user_id, password}`, `user_delete {user_id}`, `reset_all`.
 
 **`GET /api/state`** restituisce:
 `me{id,name,email,is_admin,team_id}`, `settings{...}`, `teams[]` (ogni squadra ha anche `coach`, `avail`, `counts{P,D,C,A}`, `roster`, `cambi_left`, `scambi_left` (−1 = illimitati), `pending_release[]`), `players[]`, `auction` (quella aperta oppure l'ultima, con `player`, `participants[]` e `bids[]`), `trades[]` (l'admin le vede tutte; gli altri vedono quelle accettate e le proprie), `moves[]` (le ultime 1000), `events[]` (le ultime 100), `vapidPublicKey`, `mySubs`, `listoneCount`, e solo per l'admin `users[]`.
@@ -209,7 +209,7 @@ L'unico punto da toccare è `currentUser(req)` in `league.js`: oggi legge il coo
 npm install
 npx wrangler dev --port 8787          # terminale 1 (ambiente locale, MAI produzione)
 cd test && npm install
-npm test                               # crittografia push + 35 controlli sulle regole: deve finire con "TUTTI I CONTROLLI SUPERATI"
+npm test                               # crittografia push + 40 controlli sulle regole: deve finire con "TUTTI I CONTROLLI SUPERATI"
 npx playwright install chromium && npm run test:ui   # due telefoni simulati, tempo reale
 ```
 `BASE_URL` e `ADMIN_PASSWORD` sono variabili d'ambiente opzionali. I test **cancellano i dati** del server a cui puntano (`reset_all`): usali solo in locale o in un ambiente di prova. Se hai aggiunto un prefisso ai percorsi (9.B), aggiorna anche `api()` nei test.

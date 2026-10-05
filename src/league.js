@@ -737,7 +737,12 @@ export class League extends DurableObject {
           if (tid) { const c = this.coachOf(tid); if (c && c.id !== uid) bad(`La squadra è già di ${c.name}`); }
           this.run('UPDATE users SET team_id=? WHERE id=?', tid, uid);
         }
-        if (b.is_admin !== undefined && u.email !== ADMIN_EMAIL) this.run('UPDATE users SET is_admin=? WHERE id=?', b.is_admin ? 1 : 0, uid);
+        if (b.is_admin !== undefined) {
+          if (u.email === ADMIN_EMAIL) bad('L\'admin principale non può perdere i permessi');
+          this.run('UPDATE users SET is_admin=? WHERE id=?', b.is_admin ? 1 : 0, uid);
+          this.log('admin', b.is_admin ? `👑 ${u.name} è ora admin` : `${u.name} non è più admin`);
+          if (b.is_admin) this.notifyUsers([uid], { title: '👑 Ora sei admin', body: 'Puoi gestire l\'asta dal cockpit admin.', tag: 'admin' });
+        }
         return { ok: true };
       }
       case 'user_delete': {
