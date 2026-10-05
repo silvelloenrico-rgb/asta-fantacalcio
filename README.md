@@ -13,7 +13,7 @@ Collegato a Cloudflare Workers Builds: ogni push su `main` viene pubblicato con 
 ## Primo avvio
 
 1. Apri l'app e iscriviti con `silvello.enrico@gmail.com` (diventa automaticamente admin).
-2. Admin → File: carica il file **Rose** (un foglio per squadra, riga 1 "Nome squadra (N MILIONI)") e il file **Svincolati** (usa il foglio "Tutti").
+2. Admin → File: carica il file **Rose** (un foglio per squadra, riga 1 "Nome squadra (N MILIONI)") e il **listone completo** con le quotazioni (foglio "Tutti"). Gli svincolati sono calcolati: listone meno i giocatori già in rosa.
 3. Admin → Regole: cambi per squadra, scambi come cambi, fantamilioni extra, base d'asta, limiti rosa.
 4. Condividi il link: ogni allenatore si iscrive e sceglie la propria squadra.
 5. Admin → ordine dei turni → **Avvia asta**.
@@ -23,7 +23,8 @@ Collegato a Cloudflare Workers Builds: ogni push su `main` viene pubblicato con 
 - Chi ha il turno chiama uno svincolato con un'offerta di apertura; tutti gli allenatori con cambi disponibili partecipano.
 - Ognuno rilancia o si ritira; quando resta solo il migliore offerente, vince. Chi non può più permettersi il rilancio esce in automatico.
 - Il turno resta a chi lo ha finché non acquista un giocatore o conclude uno scambio (o passa); poi va al successivo che ha ancora cambi/scambi.
-- Ogni acquisto consuma 1 cambio a chi vince; se il ruolo è pieno deve svincolare un giocatore dello stesso ruolo.
+- Ogni acquisto consuma 1 cambio a chi vince; se il ruolo è pieno deve svincolare un giocatore dello stesso ruolo. La prossima asta parte solo dopo lo svincolo.
+- Rimborso svincolo: nessuno, metà del costo, costo pieno, oppure il minore tra costo pagato (dalla rosa) e quotazione attuale (dal listone).
 - Scambio: 1 giocatore contro 1 + crediti in una direzione; se gli scambi valgono come cambi consuma 1 cambio a entrambe.
 - Notifiche: asta aperta, rilanci (solo a chi è ancora in gara), aggiudicazione, turno, scambi proposti/accettati/rifiutati.
 

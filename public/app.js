@@ -108,12 +108,17 @@ const isMyTurn = () => S.settings.phase === 'running' && turnId() && turnId() ==
 const myPendingTrade = () => S.trades.find((t) => t.status === 'pending' && t.from_team_id === myTeamId());
 const incomingTrades = () => S.trades.filter((t) => t.status === 'pending' && t.to_team_id === myTeamId());
 const basePrice = (p) => (S.settings.base_mode === 'quotazione' ? Math.max(1, p.quotazione || 1) : 1);
-const canCall = () => isMyTurn() && !openAuction() && !myPendingTrade() && myTeam()?.cambi_left > 0 && !myTeam()?.pending_release.length;
+const waitingRelease = () => S.teams.find((t) => t.pending_release.length);
+const canCall = () => isMyTurn() && !openAuction() && !myPendingTrade() && myTeam()?.cambi_left > 0 && !waitingRelease();
 const canTrade = () => isMyTurn() && !openAuction() && !myPendingTrade() && myTeam()?.scambi_left !== 0;
 const scambiLbl = (t) => (t.scambi_left === -1 ? '∞' : t.scambi_left);
 const tradesSeparate = () => S.settings.scambi_as_cambi !== '1';
 const lim = (r) => parseInt(S.settings['lim_' + r]) || 0;
 const rosterSize = () => ROLES.reduce((n, r) => n + lim(r), 0);
+const refundFor = (p) => {
+  const c = p.cost || 0, m = S.settings.release_refund;
+  return m === 'full' ? c : m === 'half' ? Math.ceil(c / 2) : m === 'min' ? (p.quotazione == null ? c : Math.min(c, p.quotazione)) : 0;
+};
 const pill = (r) => `<span class="pill ${r}">${r}</span>`;
 
 // ---------------- rendering ----------------
@@ -311,10 +316,10 @@ const views = {
 function releaseCard(t) {
   const role = t.pending_release[0];
   const mine = S.players.filter((p) => p.team_id === t.id && p.role === role).sort((a, b) => (a.cost || 0) - (b.cost || 0));
-  const refund = { none: 'senza rimborso', half: 'con rimborso di metà del costo', full: 'con rimborso del costo' }[S.settings.release_refund];
+  const refund = { none: 'senza rimborso', half: 'con rimborso di metà del costo', full: 'con rimborso del costo', min: 'con rimborso del minore tra costo pagato e quotazione attuale' }[S.settings.release_refund];
   return `<div class="card warn"><h3>✂️ Devi svincolare un ${ROLE_ONE[role]}</h3>
-    <p class="small muted">Hai superato il limite di ${lim(role)} ${ROLE_LBL[role].toLowerCase()}. Scegli chi lasciare (${refund}). Finché non lo fai non puoi partecipare alle aste.</p>
-    <div class="list">${mine.map((p) => `<div class="li">${pill(p.role)}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.club)} · pagato ${p.cost ?? 0}</div></div><button class="btn sm danger" data-release="${p.id}">Svincola</button></div>`).join('')}</div></div>`;
+    <p class="small muted">Hai superato il limite di ${lim(role)} ${ROLE_LBL[role].toLowerCase()}. Scegli chi lasciare (${refund}). <b>La prossima asta parte solo dopo il tuo svincolo.</b></p>
+    <div class="list">${mine.map((p) => `<div class="li">${pill(p.role)}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.club)} · pagato ${p.cost ?? 0} · quot. ${p.quotazione ?? '–'}</div></div><div class="right"><div class="num" style="color:var(--good)">+${refundFor(p)}</div><div class="sub">rimborso</div></div><button class="btn sm danger" data-release="${p.id}">Svincola</button></div>`).join('')}</div></div>`;
 }
 
 function tradeText(t) {
@@ -392,6 +397,8 @@ function turnCard() {
   if (mine && !a) {
     const pt = myPendingTrade();
     h += `<p class="small muted" style="margin:8px 0">Il turno resta tuo finché non compri un giocatore o concludi uno scambio.</p>`;
+    const wr = waitingRelease();
+    if (wr) h += `<div class="banner small">⏳ Prima della prossima asta <b>${esc(wr.name)}</b> deve svincolare un giocatore. Riceverai una notifica.</div>`;
     if (pt) h += `<div class="banner small">Hai una proposta di scambio in attesa con <b>${esc(tname(pt.to_team_id))}</b>. <a href="#scambi" data-tab="scambi">Vedi</a></div>`;
     h += `<div class="row wrap">
       <button class="btn primary grow big" data-tab="svincolati" ${canCall() ? '' : 'disabled'}>🔨 Chiama un giocatore</button>
@@ -566,8 +573,8 @@ function adminView() {
     <label class="f"><span>Rose (un foglio per squadra)</span><input type="file" id="file_rose" accept=".xlsx,.xls"></label>
     <div class="small muted">${S.teams.length} squadre · ${S.players.filter((p) => p.team_id).length} giocatori in rosa</div>
     <hr class="sep">
-    <label class="f"><span>Svincolati con quotazioni</span><input type="file" id="file_svi" accept=".xlsx,.xls"></label>
-    <div class="small muted">${nFree} svincolati</div>
+    <label class="f"><span>Listone completo con quotazioni</span><input type="file" id="file_svi" accept=".xlsx,.xls"></label>
+    <div class="small muted">${S.listoneCount} giocatori nel listone · ${nFree} svincolati (calcolati: listone meno chi è già in rosa)</div>
     <hr class="sep">
     <button class="btn sm" data-a="export">⬇️ Esporta rose attuali (.xlsx)</button>
   </div>
@@ -582,7 +589,7 @@ function adminView() {
     <label class="f"><span>Rilancio minimo</span><input type="number" id="set_min_raise" data-keep min="1" value="${esc(s.min_raise)}"></label>
     <label class="f"><span>Limiti rosa P / D / C / A</span><div class="row">${ROLES.map((r) => `<input type="number" id="set_lim_${r}" data-keep min="0" value="${esc(s['lim_' + r])}">`).join('')}</div></label>
     <label class="check"><input type="checkbox" id="set_reserve_slots" data-keep ${s.reserve_slots === '1' ? 'checked' : ''}> Tieni 1 credito per ogni posto vuoto in rosa</label>
-    <label class="f"><span>Rimborso quando si svincola</span>${sel('release_refund', [['none', 'Nessun rimborso'], ['half', 'Metà del costo'], ['full', 'Costo pieno']])}</label>
+    <label class="f"><span>Rimborso quando si svincola</span>${sel('release_refund', [['none', 'Nessun rimborso'], ['min', 'Il minore tra costo pagato e quotazione attuale'], ['half', 'Metà del costo'], ['full', 'Costo pieno']])}</label>
     <button class="btn primary block" data-a="savesettings">Salva regole</button>
   </div>
 
@@ -649,8 +656,13 @@ async function uploadSvincolati(file) {
     const [XLSX, wb] = await readWorkbook(file);
     const players = parseSvincolati(XLSX, wb);
     const by = ROLES.map((r) => `${r}: ${players.filter((p) => p.role === r).length}`).join(' · ');
-    confirmModal(`Caricare <b>${players.length} svincolati</b>?<div class="small muted" style="margin-top:6px">${by}</div><div class="small muted" style="margin-top:8px">La lista attuale degli svincolati verrà sostituita.</div>`,
-      async () => { const r = await admin('import_svincolati', { players }); if (r) toast(`Caricati ${r.players} svincolati`); }, 'Carica');
+    confirmModal(`Caricare il listone con <b>${players.length} giocatori</b>?<div class="small muted" style="margin-top:6px">${by}</div><div class="small muted" style="margin-top:8px">Gli svincolati vengono calcolati togliendo i giocatori già in rosa. Le quotazioni dei giocatori in rosa vengono aggiornate.</div>`,
+      async () => {
+        const r = await admin('import_listone', { players });
+        if (!r) return;
+        toast(`Listone caricato: ${r.free} svincolati, ${r.matched} giocatori in rosa riconosciuti`);
+        if (r.missing && r.missing.length) openModal(`<h3>Giocatori in rosa non trovati nel listone</h3><p class="small muted">Restano nelle rose ma senza quotazione (rimborso = costo pagato).</p><div class="small">${r.missing.map(esc).join('<br>')}</div><button class="btn block" data-close style="margin-top:12px">Ok</button>`);
+      }, 'Carica');
   } catch (e) { toast(e.message, true); }
 }
 async function exportRose() {

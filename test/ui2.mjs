@@ -1,0 +1,13 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+const ctx = await b.newContext({ viewport: { width: 390, height: 844 } });
+await ctx.route(/fonts\.(googleapis|gstatic)/, r => r.abort());
+const p = await ctx.newPage(); const errs=[]; p.on('pageerror', e => errs.push(e.message));
+await p.goto('http://localhost:8787'); await p.fill('input[name=email]','silvello.enrico@gmail.com'); await p.fill('input[name=password]','secret1'); await p.click('button[type=submit]');
+await p.waitForSelector('nav.tabs');
+await p.click('[data-tab=admin]'); await p.waitForTimeout(300);
+console.log(await p.locator('text=giocatori nel listone').textContent());
+console.log(await p.locator('#set_release_refund').evaluate(s => [...s.options].map(o=>o.text+(o.selected?' *':'')).join(' | ')));
+await p.click('[data-tab=asta]'); await p.waitForTimeout(300);
+console.log('errori pagina:', errs.length ? errs : 'nessuno');
+await b.close();

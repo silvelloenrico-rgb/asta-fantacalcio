@@ -16,7 +16,7 @@ const DEFAULTS = {
   min_raise: '1',
   lim_P: '3', lim_D: '8', lim_C: '8', lim_A: '6',
   reserve_slots: '1',
-  release_refund: 'none', // none | half | full
+  release_refund: 'none', // none | half | full | min
   default_cambi: '3',
 };
 const PUBLIC_SETTINGS = Object.keys(DEFAULTS);
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS bids(id INTEGER PRIMARY KEY AUTOINCREMENT, auction_id
 CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY AUTOINCREMENT, from_team_id INTEGER, to_team_id INTEGER, offered_player_id INTEGER, requested_player_id INTEGER, credits INTEGER DEFAULT 0, status TEXT, note TEXT, created_at INTEGER, resolved_at INTEGER);
 CREATE TABLE IF NOT EXISTS pending_releases(id INTEGER PRIMARY KEY AUTOINCREMENT, team_id INTEGER, role TEXT, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS push_subs(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, endpoint TEXT UNIQUE, p256dh TEXT, auth TEXT, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS listone(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, club TEXT, role TEXT, quotazione INTEGER);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, kind TEXT, text TEXT);
 `;
 
@@ -342,6 +343,7 @@ export class League extends DurableObject {
       events: this.q('SELECT * FROM events ORDER BY id DESC LIMIT 100'),
       vapidPublicKey: this.getS('vapid_pub'),
       mySubs: this.one('SELECT COUNT(*) n FROM push_subs WHERE user_id=?', user.id).n,
+      listoneCount: this.one('SELECT COUNT(*) n FROM listone').n,
     };
     if (user.is_admin) out.users = this.q('SELECT id,email,name,team_id,is_admin,created_at, (SELECT COUNT(*) FROM push_subs p WHERE p.user_id=users.id) AS subs FROM users ORDER BY name');
     return out;
@@ -384,6 +386,8 @@ export class League extends DurableObject {
     if (this.one("SELECT id FROM trades WHERE from_team_id=? AND status='pending'", t.id)) bad('Hai una proposta di scambio in attesa: annullala prima di chiamare un giocatore');
     if (this.cambiLeft(t) <= 0) bad('Non hai più cambi disponibili');
     if (this.hasPendingRelease(t.id)) bad('Prima devi svincolare un giocatore');
+    const pend = this.one('SELECT team_id FROM pending_releases ORDER BY id LIMIT 1');
+    if (pend) bad(`Aspetta che ${this.tName(pend.team_id)} svincoli un giocatore prima della prossima asta`);
     const p = this.player(playerId);
     if (!p) bad('Giocatore non trovato');
     if (p.team_id) bad('Il giocatore non è svincolato');
@@ -530,13 +534,26 @@ export class League extends DurableObject {
     if (!p || p.team_id !== t.id) bad('Il giocatore non è nella tua rosa');
     const pr = this.one('SELECT * FROM pending_releases WHERE team_id=? AND role=? ORDER BY id LIMIT 1', t.id, p.role);
     if (!pr) bad('Non devi svincolare giocatori in questo ruolo');
-    const mode = this.getS('release_refund');
-    const refund = mode === 'full' ? (p.cost || 0) : mode === 'half' ? Math.ceil((p.cost || 0) / 2) : 0;
+    const refund = this.refundFor(p);
     this.run('UPDATE players SET team_id=NULL, cost=NULL, acquired_at=NULL WHERE id=?', p.id);
     if (refund) this.run('UPDATE teams SET credits=credits+? WHERE id=?', refund, t.id);
     this.run('DELETE FROM pending_releases WHERE id=?', pr.id);
     this.log('release', `✂️ ${actor} svincola ${p.name}${refund ? ` (+${refund} crediti)` : ''}`);
+    // the next auction was waiting for this release: tell whoever holds the turn
+    const turn = this.turnTeamId();
+    if (!this.one('SELECT id FROM pending_releases') && this.getS('phase') === 'running' && turn && turn !== t.id) {
+      this.notifyTeams([turn], { title: '👉 Puoi chiamare il prossimo giocatore', body: `${t.name} ha svincolato ${p.name}. Tocca a te!`, tag: 'turn' });
+    }
     return { ok: true };
+  }
+
+  refundFor(p) {
+    const mode = this.getS('release_refund');
+    const cost = p.cost || 0;
+    if (mode === 'full') return cost;
+    if (mode === 'half') return Math.ceil(cost / 2);
+    if (mode === 'min') return p.quotazione == null ? cost : Math.min(cost, p.quotazione);
+    return 0;
   }
 
   tradeCheckCapacity(t) {
@@ -631,7 +648,7 @@ export class League extends DurableObject {
   admin(user, b) {
     switch (b.type) {
       case 'import_rose': return this.importRose(b.teams || []);
-      case 'import_svincolati': return this.importSvincolati(b.players || []);
+      case 'import_listone': case 'import_svincolati': return this.importListone(b.players || []);
       case 'settings': {
         for (const [k, v] of Object.entries(b.settings || {})) {
           if (!PUBLIC_SETTINGS.includes(k) || k === 'phase' || k === 'turn_team_id') continue;
@@ -658,7 +675,7 @@ export class League extends DurableObject {
       }
       case 'start': {
         if (!this.one('SELECT id FROM teams')) bad('Carica prima il file Rose');
-        if (!this.one('SELECT id FROM players WHERE team_id IS NULL')) bad('Carica prima il file degli svincolati');
+        if (!this.one('SELECT id FROM players WHERE team_id IS NULL')) bad('Carica prima il listone');
         this.setS('phase', 'running');
         this.log('phase', '🚀 L\'asta è iniziata!');
         const others = this.q('SELECT id FROM teams').map((x) => x.id);
@@ -757,7 +774,7 @@ export class League extends DurableObject {
         return { ok: true };
       }
       case 'reset_all': {
-        for (const tb of ['teams', 'players', 'auctions', 'auction_participants', 'bids', 'trades', 'pending_releases', 'events']) this.run(`DELETE FROM ${tb}`);
+        for (const tb of ['teams', 'players', 'listone', 'auctions', 'auction_participants', 'bids', 'trades', 'pending_releases', 'events']) this.run(`DELETE FROM ${tb}`);
         this.run('UPDATE users SET team_id=NULL');
         this.setS('phase', 'setup'); this.setS('turn_team_id', '');
         this.log('admin', '♻️ Dati azzerati dall\'admin');
@@ -791,8 +808,6 @@ export class League extends DurableObject {
         this.run('DELETE FROM teams WHERE id=?', t.id);
       }
     }
-    // free agents keep their quotazione, rostered players are replaced
-    const quot = new Map(this.q('SELECT name, club, quotazione FROM players WHERE team_id IS NULL').map((p) => [norm(p.name) + '|' + norm(p.club), p.quotazione]));
     this.run('DELETE FROM players WHERE team_id IS NOT NULL');
     this.run('DELETE FROM pending_releases');
     const ids = new Map(this.q('SELECT id, name FROM teams').map((t) => [norm(t.name), t.id]));
@@ -801,35 +816,63 @@ export class League extends DurableObject {
       const tid = ids.get(norm(t.name));
       for (const p of t.players || []) {
         if (!p.name || !ROLES.includes(p.role)) continue;
-        const key = norm(p.name) + '|' + norm(p.club);
-        this.run('INSERT INTO players(name,club,role,quotazione,team_id,cost) VALUES(?,?,?,?,?,?)', String(p.name).trim(), String(p.club || '').trim(), p.role, quot.get(key) ?? null, tid, int(p.cost));
+        this.run('INSERT INTO players(name,club,role,team_id,cost) VALUES(?,?,?,?,?)', String(p.name).trim(), String(p.club || '').trim(), p.role, tid, int(p.cost));
         n++;
       }
     }
-    // a player can't be both rostered and free
-    this.run(`DELETE FROM players WHERE team_id IS NULL AND EXISTS (SELECT 1 FROM players r WHERE r.team_id IS NOT NULL AND lower(r.name)=lower(players.name) AND lower(r.club)=lower(players.club))`);
+    const r = this.rebuildFromListone();
     this.log('admin', `📥 Caricate le rose: ${teams.length} squadre, ${n} giocatori`);
-    return { ok: true, teams: teams.length, players: n };
+    return { ok: true, teams: teams.length, players: n, ...r };
   }
 
-  importSvincolati(players) {
+  // The listone is the full list of Serie A players with their current quotazione.
+  // Free agents = listone minus everyone currently in a roster.
+  importListone(players) {
     if (!players.length) bad('Il file non contiene giocatori');
     if (this.openAuction()) bad('C\'è un\'asta in corso');
-    const rostered = new Map(this.q('SELECT id, name, club FROM players WHERE team_id IS NOT NULL').map((p) => [norm(p.name) + '|' + norm(p.club), p.id]));
-    this.run('DELETE FROM players WHERE team_id IS NULL');
+    this.run('DELETE FROM listone');
     const seen = new Set();
-    let n = 0;
     for (const p of players) {
       if (!p.name || !ROLES.includes(p.role)) continue;
       const key = norm(p.name) + '|' + norm(p.club);
       if (seen.has(key)) continue;
       seen.add(key);
       const q = p.quotazione === '' || p.quotazione == null ? null : int(p.quotazione);
-      if (rostered.has(key)) { this.run('UPDATE players SET quotazione=? WHERE id=?', q, rostered.get(key)); continue; }
-      this.run('INSERT INTO players(name,club,role,quotazione) VALUES(?,?,?,?)', String(p.name).trim(), String(p.club || '').trim(), p.role, q);
-      n++;
+      this.run('INSERT INTO listone(name,club,role,quotazione) VALUES(?,?,?,?)', String(p.name).trim(), String(p.club || '').trim(), p.role, q);
     }
-    this.log('admin', `📥 Caricati ${n} svincolati`);
-    return { ok: true, players: n };
+    const r = this.rebuildFromListone();
+    this.log('admin', `📥 Caricato il listone: ${seen.size} giocatori, ${r.free} svincolati`);
+    return { ok: true, listone: seen.size, ...r };
   }
+
+  rebuildFromListone() {
+    const listone = this.q('SELECT * FROM listone');
+    if (!listone.length) return { free: this.one('SELECT COUNT(*) n FROM players WHERE team_id IS NULL').n, matched: 0, missing: [] };
+    const rostered = this.q('SELECT id, name, club, role FROM players WHERE team_id IS NOT NULL');
+    const byNC = new Map(rostered.map((p) => [norm(p.name) + '|' + norm(p.club), p]));
+    const byNR = new Map();
+    for (const p of rostered) { const k = norm(p.name) + '|' + p.role; byNR.set(k, (byNR.get(k) || []).concat(p)); }
+    const used = new Set();
+    this.run('DELETE FROM players WHERE team_id IS NULL');
+    let free = 0;
+    for (const l of listone) {
+      let p = byNC.get(norm(l.name) + '|' + norm(l.club));
+      if (!p || used.has(p.id)) {
+        // player changed club: match by name + role when unambiguous
+        const c = (byNR.get(norm(l.name) + '|' + l.role) || []).filter((x) => !used.has(x.id));
+        p = c.length === 1 ? c[0] : null;
+      }
+      if (p) {
+        used.add(p.id);
+        this.run('UPDATE players SET quotazione=?, club=? WHERE id=?', l.quotazione, l.club, p.id);
+      } else {
+        this.run('INSERT INTO players(name,club,role,quotazione) VALUES(?,?,?,?)', l.name, l.club, l.role, l.quotazione);
+        free++;
+      }
+    }
+    const missing = rostered.filter((p) => !used.has(p.id));
+    for (const p of missing) this.run('UPDATE players SET quotazione=NULL WHERE id=?', p.id);
+    return { free, matched: used.size, missing: missing.map((p) => `${p.name} (${p.club})`) };
+  }
+
 }
