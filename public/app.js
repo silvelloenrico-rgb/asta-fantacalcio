@@ -113,8 +113,7 @@ const canCall = () => isMyTurn() && !openAuction() && !myPendingTrade() && myTea
 const canTrade = () => isMyTurn() && !openAuction() && !myPendingTrade() && myTeam()?.scambi_left !== 0;
 const scambiLbl = (t) => (t.scambi_left === -1 ? '∞' : t.scambi_left);
 const tradesSeparate = () => S.settings.scambi_as_cambi !== '1';
-const lim = (r) => parseInt(S.settings['lim_' + r]) || 0;
-const rosterSize = () => ROLES.reduce((n, r) => n + lim(r), 0);
+const rosterSize = () => parseInt(S.settings.roster_max) || 25;
 const refundFor = (p) => {
   const c = p.cost || 0, m = S.settings.release_refund;
   return m === 'full' ? c : m === 'half' ? Math.ceil(c / 2) : m === 'min' ? (p.quotazione == null ? c : Math.min(c, p.quotazione)) : 0;
@@ -142,7 +141,7 @@ function render() {
       ['asta', '🔨', 'Asta'],
       ['svincolati', '📋', 'Svincolati'],
       ['rose', '👥', 'Rose'],
-      ['scambi', '🔄', 'Scambi', incomingTrades().length],
+      ['movimenti', '📒', 'Movimenti', incomingTrades().length],
       ['log', '🕒', 'Diario'],
       ...(S.me.is_admin ? [['admin', '⚙️', 'Admin']] : []),
     ];
@@ -258,7 +257,6 @@ const views = {
     let list = S.players.filter((p) => !p.team_id);
     if (ui.role) list = list.filter((p) => p.role === ui.role);
     if (ui.search) { const q = ui.search.toLowerCase(); list = list.filter((p) => p.name.toLowerCase().includes(q) || (p.club || '').toLowerCase().includes(q)); }
-    if (ui.onlyAffordable && t) list = list.filter((p) => basePrice(p) <= t.maxBid[p.role]);
     list.sort((a, b) => (b.quotazione || 0) - (a.quotazione || 0) || a.name.localeCompare(b.name));
     return `
       <h2>Svincolati</h2>
@@ -267,13 +265,12 @@ const views = {
       <div class="chips" style="margin:10px 0">
         <span class="chip ${!ui.role ? 'on' : ''}" data-role="">Tutti</span>
         ${ROLES.map((r) => `<span class="chip ${ui.role === r ? 'on' : ''}" data-role="${r}">${pill(r)} ${ROLE_LBL[r]}</span>`).join('')}
-        ${t ? `<span class="chip ${ui.onlyAffordable ? 'on' : ''}" data-a="afford">Alla mia portata</span>` : ''}
       </div>
       <div class="small muted" style="margin-bottom:6px">${list.length} giocatori · base d'asta: ${S.settings.base_mode === 'quotazione' ? 'quotazione' : '1 credito'}</div>
       <div class="list">${list.slice(0, 300).map((p) => `
         <div class="li">${pill(p.role)}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.club)}</div></div>
         <div class="right"><div class="num">${p.quotazione ?? '–'}</div><div class="sub">quot.</div></div>
-        ${call ? `<button class="btn sm primary" data-call="${p.id}" ${basePrice(p) > t.maxBid[p.role] ? 'disabled' : ''}>Chiama</button>` : ''}</div>`).join('') || '<div class="empty">Nessun giocatore</div>'}</div>`;
+        ${call ? `<button class="btn sm primary" data-call="${p.id}">Chiama</button>` : ''}</div>`).join('') || '<div class="empty">Nessun giocatore</div>'}</div>`;
   },
 
   rose() {
@@ -291,19 +288,32 @@ const views = {
       }).join('') || '<div class="empty">Le rose non sono ancora state caricate.</div>'}</div>`;
   },
 
-  scambi() {
+  movimenti() {
     const mine = myTeamId();
     const inc = incomingTrades();
     const out = S.trades.filter((t) => t.status === 'pending' && t.from_team_id === mine);
-    const hist = S.trades.filter((t) => t.status !== 'pending');
     const others = S.me.is_admin ? S.trades.filter((t) => t.status === 'pending' && t.from_team_id !== mine && t.to_team_id !== mine) : [];
-    return `<h2>Scambi</h2>
-      ${canTrade() ? '<div class="banner small">Per proporre uno scambio vai in <b>Rose</b>, apri una squadra e tocca <b>Scambia</b>.</div>' : ''}
-      <h3>Ricevute</h3>${inc.map((t) => tradeCard(t, true)).join('') || '<div class="empty small">Nessuna proposta ricevuta</div>'}
-      <h3 style="margin-top:18px">Inviate</h3>${out.map((t) => tradeCard(t, false)).join('') || '<div class="empty small">Nessuna proposta in attesa</div>'}
-      ${others.length ? `<h3 style="margin-top:18px">Altre in attesa (admin)</h3>${others.map((t) => tradeCard(t, false, true)).join('')}` : ''}
-      <h3 style="margin-top:18px">Storico</h3>
-      <div class="list">${hist.map((t) => `<div class="li"><div class="grow small">${tradeText(t)}</div><span class="small" style="color:${t.status === 'accepted' ? 'var(--good)' : 'var(--muted)'}">${{ accepted: 'Accettato', rejected: 'Rifiutato', cancelled: 'Annullato' }[t.status]}</span></div>`).join('') || '<div class="empty small">Ancora nessuno scambio</div>'}</div>`;
+    const f = ui.moveTeam || null;
+    const moves = S.moves.filter((m) => !f || m.team_id === f || m.other_team_id === f);
+    const teamsShown = f ? [team(f)].filter(Boolean) : S.teams;
+    const sum = (tid, kind) => S.moves.filter((m) => m.kind === kind && (m.team_id === tid || (kind === 'scambio' && m.other_team_id === tid)));
+    let h = `<h2>Movimenti</h2>`;
+    if (inc.length || out.length || others.length) {
+      h += inc.map((t) => tradeCard(t, true)).join('') + out.map((t) => tradeCard(t, false)).join('') + others.map((t) => tradeCard(t, false, true)).join('');
+    }
+    if (canTrade()) h += '<div class="banner small">Per proporre uno scambio vai in <b>Rose</b>, apri una squadra e tocca <b>Scambia</b>.</div>';
+    h += `<div class="chips" style="margin:10px 0"><span class="chip ${!f ? 'on' : ''}" data-moveteam="">Tutte</span>${S.teams.map((t) => `<span class="chip ${f === t.id ? 'on' : ''}" data-moveteam="${t.id}">${esc(t.name)}</span>`).join('')}</div>`;
+    if (f) {
+      const t = team(f);
+      const acq = sum(f, 'acquisto'), sv = sum(f, 'svincolo'), sc = sum(f, 'scambio');
+      const spent = acq.reduce((n, m) => n + (m.amount || 0), 0), back = sv.reduce((n, m) => n + (m.amount || 0), 0);
+      h += `<div class="card"><div class="row"><div class="grow"><h3 style="margin:0">${esc(t.name)}</h3><div class="small muted">${t.coach ? esc(t.coach) : ''}</div></div><div class="right"><div class="num" style="color:${t.avail < 0 ? 'var(--bad)' : 'var(--accent)'}">${t.avail}</div><div class="small muted">crediti</div></div></div>
+        <div class="stats"><span><b>${acq.length}</b> acquisti (−${spent})</span><span><b>${sv.length}</b> svincoli (+${back})</span><span><b>${sc.length}</b> scambi</span><span><b>${t.cambi_left}</b> cambi rimasti</span></div></div>`;
+    } else {
+      h += `<div class="list" style="margin-bottom:12px">${teamsShown.map((t) => `<div class="li click" data-moveteam="${t.id}"><div class="grow"><div class="name">${esc(t.name)}</div><div class="sub">${sum(t.id, 'acquisto').length} acquisti · ${sum(t.id, 'svincolo').length} svincoli · ${sum(t.id, 'scambio').length} scambi</div></div><div class="right"><div class="num" style="color:${t.avail < 0 ? 'var(--bad)' : 'inherit'}">${t.avail}</div><div class="sub">crediti</div></div></div>`).join('')}</div>`;
+    }
+    h += `<div class="list">${moves.map(moveRow).join('') || '<div class="empty small">Ancora nessun movimento</div>'}</div>`;
+    return h;
   },
 
   log() {
@@ -314,12 +324,24 @@ const views = {
 };
 
 function releaseCard(t) {
-  const role = t.pending_release[0];
-  const mine = S.players.filter((p) => p.team_id === t.id && p.role === role).sort((a, b) => (a.cost || 0) - (b.cost || 0));
+  const mine = S.players.filter((p) => p.team_id === t.id).sort((a, b) => ROLES.indexOf(a.role) - ROLES.indexOf(b.role) || (a.cost || 0) - (b.cost || 0));
   const refund = { none: 'senza rimborso', half: 'con rimborso di metà del costo', full: 'con rimborso del costo', min: 'con rimborso del minore tra costo pagato e quotazione attuale' }[S.settings.release_refund];
-  return `<div class="card warn"><h3>✂️ Devi svincolare un ${ROLE_ONE[role]}</h3>
-    <p class="small muted">Hai superato il limite di ${lim(role)} ${ROLE_LBL[role].toLowerCase()}. Scegli chi lasciare (${refund}). <b>La prossima asta parte solo dopo il tuo svincolo.</b></p>
+  return `<div class="card warn"><h3>✂️ Devi svincolare un giocatore</h3>
+    <p class="small muted">Hai ${t.roster} giocatori su ${rosterSize()}: scegli chi lasciare, di qualsiasi ruolo (${refund}). <b>La prossima asta parte solo dopo il tuo svincolo.</b></p>
     <div class="list">${mine.map((p) => `<div class="li">${pill(p.role)}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.club)} · pagato ${p.cost ?? 0} · quot. ${p.quotazione ?? '–'}</div></div><div class="right"><div class="num" style="color:var(--good)">+${refundFor(p)}</div><div class="sub">rimborso</div></div><button class="btn sm danger" data-release="${p.id}">Svincola</button></div>`).join('')}</div></div>`;
+}
+
+function moveRow(m) {
+  const pl = (n, r, c) => `${pill(r)} <b>${esc(n)}</b> <span class="muted">${esc(c || '')}</span>`;
+  let badge, body, amt = '';
+  if (m.kind === 'acquisto') { badge = '<span style="color:var(--good)">ACQUISTO</span>'; body = `${pl(m.player_name, m.player_role, m.player_club)}`; amt = `<span class="num" style="color:var(--bad)">−${m.amount}</span>`; }
+  else if (m.kind === 'svincolo') { badge = '<span style="color:var(--bad)">SVINCOLO</span>'; body = `${pl(m.player_name, m.player_role, m.player_club)}`; amt = m.amount ? `<span class="num" style="color:var(--good)">+${m.amount}</span>` : ''; }
+  else {
+    badge = '<span style="color:var(--info)">SCAMBIO</span>';
+    const cr = m.amount > 0 ? ` · ${m.amount} cr a ${esc(tname(m.other_team_id))}` : m.amount < 0 ? ` · ${-m.amount} cr a ${esc(tname(m.team_id))}` : '';
+    body = `dà ${pl(m.player_name, m.player_role, m.player_club)} a <b>${esc(tname(m.other_team_id))}</b><br>riceve ${pl(m.other_player_name, m.other_player_role, m.other_player_club)}<span class="muted">${cr}</span>`;
+  }
+  return `<div class="li"><div class="grow small"><div class="row" style="gap:8px"><span style="font-weight:700;font-size:11px;letter-spacing:.5px">${badge}</span><span class="muted">${dayhm(m.ts)}</span></div><div style="margin-top:3px"><b>${esc(tname(m.team_id))}</b> · ${body}</div></div>${amt}</div>`;
 }
 
 function tradeText(t) {
@@ -354,15 +376,14 @@ function auctionCard(a) {
   const t = myTeam();
   const minRaise = Math.max(1, parseInt(S.settings.min_raise) || 1);
   const next = a.current_bid + minRaise;
-  const maxB = t ? t.maxBid[p.role] : 0;
   const amLeader = a.leader_team_id === me;
   let controls = '';
   if (part && part.status === 'active' && !amLeader) {
     const steps = [minRaise, minRaise * 2, 5, 10].filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 4);
     controls = `
-      <div class="raise-grid">${steps.map((s) => `<button class="btn primary" data-raise="${a.current_bid + s}" ${a.current_bid + s > maxB ? 'disabled' : ''}>+${s}</button>`).join('')}</div>
-      <div class="row"><input type="number" id="custombid" data-keep inputmode="numeric" min="${next}" max="${maxB}" placeholder="Offerta (min ${next})" class="grow"><button class="btn primary" data-a="custombid">Offri</button></div>
-      <div class="small muted" style="margin:6px 0 10px">Puoi offrire fino a <b>${maxB}</b> crediti.</div>
+      <div class="raise-grid">${steps.map((s) => `<button class="btn primary" data-raise="${a.current_bid + s}">+${s}</button>`).join('')}</div>
+      <div class="row"><input type="number" id="custombid" data-keep inputmode="numeric" min="${next}" placeholder="Offerta (min ${next})" class="grow"><button class="btn primary" data-a="custombid">Offri</button></div>
+      <div class="small muted" style="margin:6px 0 10px">Hai ${t.avail} crediti${t.avail <= a.current_bid ? ' (puoi andare in negativo)' : ''}.</div>
       <button class="btn danger block" data-a="withdraw">🏳️ Mi ritiro</button>`;
   } else if (amLeader) controls = `<div class="banner" style="text-align:center">🏆 <b>Sei il migliore offerente.</b> Aspetta che gli altri rilancino o si ritirino.</div>`;
   else if (part && part.status !== 'active') controls = `<div class="banner small" style="text-align:center">${part.status === 'out' ? 'Non puoi partecipare a questa asta (crediti, cambi o svincolo in sospeso).' : 'Ti sei ritirato da questa asta: non riceverai più notifiche per questo giocatore.'}</div>`;
@@ -399,7 +420,7 @@ function turnCard() {
     h += `<p class="small muted" style="margin:8px 0">Il turno resta tuo finché non compri un giocatore o concludi uno scambio.</p>`;
     const wr = waitingRelease();
     if (wr) h += `<div class="banner small">⏳ Prima della prossima asta <b>${esc(wr.name)}</b> deve svincolare un giocatore. Riceverai una notifica.</div>`;
-    if (pt) h += `<div class="banner small">Hai una proposta di scambio in attesa con <b>${esc(tname(pt.to_team_id))}</b>. <a href="#scambi" data-tab="scambi">Vedi</a></div>`;
+    if (pt) h += `<div class="banner small">Hai una proposta di scambio in attesa con <b>${esc(tname(pt.to_team_id))}</b>. <a href="#movimenti" data-tab="movimenti">Vedi</a></div>`;
     h += `<div class="row wrap">
       <button class="btn primary grow big" data-tab="svincolati" ${canCall() ? '' : 'disabled'}>🔨 Chiama un giocatore</button>
       <button class="btn grow big" data-tab="rose" ${canTrade() ? '' : 'disabled'}>🔄 Proponi scambio</button></div>
@@ -429,7 +450,7 @@ function teamDetail(t) {
     ${trade ? '<div class="banner small">Tocca <b>Scambia</b> sul giocatore che vuoi.</div>' : ''}
     ${ROLES.map((r) => {
       const list = ps.filter((p) => p.role === r).sort((a, b) => (b.cost || 0) - (a.cost || 0));
-      return `<h3 style="margin-top:16px">${ROLE_LBL[r]} <span class="muted small">${list.length}/${lim(r)}</span></h3>
+      return `<h3 style="margin-top:16px">${ROLE_LBL[r]} <span class="muted small">${list.length}</span></h3>
       <div class="list">${list.map((p) => `<div class="li">${pill(r)}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.club)}${p.quotazione != null ? ' · quot. ' + p.quotazione : ''}</div></div>
         <div class="right"><div class="num">${p.cost ?? '–'}</div><div class="sub">costo</div></div>
         ${trade ? `<button class="btn sm primary" data-trade="${p.id}">Scambia</button>` : ''}</div>`).join('') || '<div class="empty small">—</div>'}</div>`;
@@ -447,12 +468,12 @@ function closeModal() { $modal.innerHTML = ''; }
 
 function callModal(pid) {
   const p = player(pid), t = myTeam();
-  const base = basePrice(p), maxB = t.maxBid[p.role];
-  const full = t.counts[p.role] >= lim(p.role);
+  const base = basePrice(p);
+  const full = t.roster >= rosterSize();
   openModal(`<h3>Chiama ${esc(p.name)}</h3>
     <div class="row small muted">${pill(p.role)} ${esc(p.club)} · quot. ${p.quotazione ?? '–'}</div>
-    ${full ? `<div class="banner small">Hai già ${lim(p.role)} ${ROLE_LBL[p.role].toLowerCase()}: se lo vinci dovrai svincolarne uno.</div>` : ''}
-    <label class="f"><span>Offerta di apertura (base ${base}, max ${maxB})</span><input type="number" id="openbid" inputmode="numeric" min="${base}" max="${maxB}" value="${base}"></label>
+    ${full ? `<div class="banner small">Hai già ${t.roster} giocatori: se lo vinci dovrai svincolarne uno (di qualsiasi ruolo).</div>` : ''}
+    <label class="f"><span>Offerta di apertura (base ${base})</span><input type="number" id="openbid" inputmode="numeric" min="${base}" value="${base}"></label>
     <p class="small muted">Tutti gli allenatori riceveranno una notifica. Vince chi resta per ultimo quando gli altri si ritirano.</p>
     <div class="row"><button class="btn ghost grow" data-close>Annulla</button><button class="btn primary grow big" id="docall">🔨 Apri l'asta</button></div>`, (m) => {
     m.querySelector('#docall').onclick = async () => {
@@ -479,7 +500,7 @@ function tradeModal(reqId) {
       const dir = parseInt(m.querySelector('#crdir').value);
       const credits = dir * Math.abs(parseInt(m.querySelector('#cramt').value) || 0);
       if (await act('trade_propose', { offered_player_id: parseInt(m.querySelector('#offered').value), requested_player_id: reqId, credits, note: m.querySelector('#tnote').value })) {
-        closeModal(); toast('Proposta inviata'); ui.tab = 'scambi'; location.hash = 'scambi'; render();
+        closeModal(); toast('Proposta inviata'); ui.tab = 'movimenti'; location.hash = 'movimenti'; render();
       }
     };
   });
@@ -587,8 +608,7 @@ function adminView() {
     <label class="f"><span>Fantamilioni extra per ogni squadra</span><input type="number" id="set_global_extra" data-keep value="${esc(s.global_extra)}"></label>
     <label class="f"><span>Base d'asta</span>${sel('base_mode', [['uno', '1 credito'], ['quotazione', 'Quotazione del listone']])}</label>
     <label class="f"><span>Rilancio minimo</span><input type="number" id="set_min_raise" data-keep min="1" value="${esc(s.min_raise)}"></label>
-    <label class="f"><span>Limiti rosa P / D / C / A</span><div class="row">${ROLES.map((r) => `<input type="number" id="set_lim_${r}" data-keep min="0" value="${esc(s['lim_' + r])}">`).join('')}</div></label>
-    <label class="check"><input type="checkbox" id="set_reserve_slots" data-keep ${s.reserve_slots === '1' ? 'checked' : ''}> Tieni 1 credito per ogni posto vuoto in rosa</label>
+    <label class="f"><span>Giocatori massimi in rosa (oltre si svincola, qualsiasi ruolo)</span><input type="number" id="set_roster_max" data-keep min="1" value="${esc(s.roster_max)}"></label>
     <label class="f"><span>Rimborso quando si svincola</span>${sel('release_refund', [['none', 'Nessun rimborso'], ['min', 'Il minore tra costo pagato e quotazione attuale'], ['half', 'Metà del costo'], ['full', 'Costo pieno']])}</label>
     <button class="btn primary block" data-a="savesettings">Salva regole</button>
   </div>
@@ -682,7 +702,7 @@ async function exportRose() {
 
 // ---------------- events ----------------
 document.addEventListener('click', async (e) => {
-  const el = e.target.closest('[data-tab],[data-a],[data-auth],[data-pick],[data-role],[data-call],[data-raise],[data-team],[data-trade],[data-trade-accept],[data-trade-reject],[data-trade-cancel],[data-release],[data-admin],[data-admin-cancel-trade],[data-force-withdraw],[data-saveteam],[data-move],[data-resetpw],[data-deluser],[data-claim]');
+  const el = e.target.closest('[data-tab],[data-a],[data-auth],[data-pick],[data-role],[data-call],[data-raise],[data-team],[data-trade],[data-trade-accept],[data-trade-reject],[data-trade-cancel],[data-release],[data-admin],[data-admin-cancel-trade],[data-force-withdraw],[data-saveteam],[data-move],[data-resetpw],[data-deluser],[data-claim],[data-moveteam]');
   if (!el || el.disabled) return;
   const d = el.dataset;
   if (d.tab !== undefined) { e.preventDefault(); closeModal(); ui.tab = d.tab; ui.teamView = null; location.hash = d.tab; render(); window.scrollTo(0, 0); return; }
@@ -690,6 +710,7 @@ document.addEventListener('click', async (e) => {
   if (d.pick) { try { await api('/api/me/team', { team_id: +d.pick }); await load(); } catch (err) { toast(err.message, true); } return; }
   if (d.claim) { try { await api('/api/me/team', { team_id: +d.claim }); await load(); } catch (err) { toast(err.message, true); } return; }
   if (d.role !== undefined) { ui.role = d.role; render(); return; }
+  if (d.moveteam !== undefined) { ui.moveTeam = d.moveteam ? +d.moveteam : null; render(); window.scrollTo(0, 0); return; }
   if (d.team !== undefined) { ui.teamView = d.team ? +d.team : null; render(); window.scrollTo(0, 0); return; }
   if (d.call) return callModal(+d.call);
   if (d.trade) return tradeModal(+d.trade);
@@ -722,7 +743,6 @@ document.addEventListener('click', async (e) => {
   switch (d.a) {
     case 'push': return pushPanel();
     case 'logout': await api('/api/logout', {}); S = null; closeModal(); try { ws && ws.close(); } catch {} return renderAuth();
-    case 'afford': ui.onlyAffordable = !ui.onlyAffordable; return render();
     case 'withdraw': return confirmModal(`Ritirarti dall'asta per <b>${esc(openAuction()?.player.name)}</b>? Non potrai rientrare.`, () => act('withdraw'), 'Mi ritiro', true);
     case 'pass': return confirmModal('Passare il turno al prossimo allenatore?', () => act('pass'), 'Passo');
     case 'custombid': {
@@ -736,9 +756,8 @@ document.addEventListener('click', async (e) => {
       const settings = {
         default_cambi: g('default_cambi').value, scambi_as_cambi: g('scambi_as_cambi').checked ? '1' : '0', max_scambi: g('max_scambi').value,
         global_extra: g('global_extra').value, base_mode: g('base_mode').value, min_raise: g('min_raise').value,
-        reserve_slots: g('reserve_slots').checked ? '1' : '0', release_refund: g('release_refund').value,
+        roster_max: g('roster_max').value, release_refund: g('release_refund').value,
       };
-      for (const r of ROLES) settings['lim_' + r] = g('lim_' + r).value;
       return admin('settings', { settings, apply_cambi_all: document.getElementById('apply_all').checked }, 'Regole salvate');
     }
     case 'setturn': return admin('set_turn', { team_id: +document.getElementById('setturn').value }, 'Turno assegnato');

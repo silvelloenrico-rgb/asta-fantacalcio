@@ -14,8 +14,7 @@ const DEFAULTS = {
   global_extra: '0',
   base_mode: 'uno', // uno | quotazione
   min_raise: '1',
-  lim_P: '3', lim_D: '8', lim_C: '8', lim_A: '6',
-  reserve_slots: '1',
+  roster_max: '25',
   release_refund: 'none', // none | half | full | min
   default_cambi: '3',
 };
@@ -35,6 +34,7 @@ CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY AUTOINCREMENT, from_tea
 CREATE TABLE IF NOT EXISTS pending_releases(id INTEGER PRIMARY KEY AUTOINCREMENT, team_id INTEGER, role TEXT, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS push_subs(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, endpoint TEXT UNIQUE, p256dh TEXT, auth TEXT, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS listone(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, club TEXT, role TEXT, quotazione INTEGER);
+CREATE TABLE IF NOT EXISTS moves(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, kind TEXT, team_id INTEGER, player_name TEXT, player_role TEXT, player_club TEXT, amount INTEGER, other_team_id INTEGER, other_player_name TEXT, other_player_role TEXT, other_player_club TEXT);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, kind TEXT, text TEXT);
 `;
 
@@ -93,18 +93,11 @@ export class League extends DurableObject {
     for (const r of this.q('SELECT role, COUNT(*) AS n FROM players WHERE team_id=? GROUP BY role', teamId)) c[r.role] = r.n;
     return c;
   }
-  lim(role) { return this.N('lim_' + role); }
   avail(t) { return t.credits + this.N('global_extra'); }
-  maxBid(t, role) {
-    let a = this.avail(t);
-    if (this.getS('reserve_slots') === '1') {
-      const c = this.counts(t.id);
-      let missing = 0;
-      for (const r of ROLES) missing += Math.max(0, this.lim(r) - c[r]);
-      if (c[role] < this.lim(role)) missing -= 1;
-      a -= Math.max(0, missing);
-    }
-    return a;
+  rosterCount(teamId) { return this.one('SELECT COUNT(*) AS n FROM players WHERE team_id=?', teamId).n; }
+  move(kind, teamId, p, amount, otherTeamId, op) {
+    this.run('INSERT INTO moves(ts,kind,team_id,player_name,player_role,player_club,amount,other_team_id,other_player_name,other_player_role,other_player_club) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+      now(), kind, teamId, p.name, p.role, p.club, amount ?? null, otherTeamId ?? null, op ? op.name : null, op ? op.role : null, op ? op.club : null);
   }
   cambiLeft(t) { return t.cambi_max - t.cambi_used; }
   tradesSeparate() { return this.getS('scambi_as_cambi') !== '1'; }
@@ -315,8 +308,8 @@ export class League extends DurableObject {
         counts: this.counts(t.id),
         cambi_left: this.cambiLeft(t),
         scambi_left: sl === Infinity ? -1 : sl,
-        maxBid: Object.fromEntries(ROLES.map((r) => [r, this.maxBid(t, r)])),
-        pending_release: this.q('SELECT role FROM pending_releases WHERE team_id=?', t.id).map((r) => r.role),
+        roster: this.rosterCount(t.id),
+        pending_release: this.q('SELECT id FROM pending_releases WHERE team_id=?', t.id).map(() => 1),
       };
     });
     const players = this.q('SELECT id,name,club,role,quotazione,team_id,cost FROM players ORDER BY role, name');
@@ -344,6 +337,7 @@ export class League extends DurableObject {
       vapidPublicKey: this.getS('vapid_pub'),
       mySubs: this.one('SELECT COUNT(*) n FROM push_subs WHERE user_id=?', user.id).n,
       listoneCount: this.one('SELECT COUNT(*) n FROM listone').n,
+      moves: this.q('SELECT * FROM moves ORDER BY id DESC LIMIT 1000'),
     };
     if (user.is_admin) out.users = this.q('SELECT id,email,name,team_id,is_admin,created_at, (SELECT COUNT(*) FROM push_subs p WHERE p.user_id=users.id) AS subs FROM users ORDER BY name');
     return out;
@@ -394,8 +388,6 @@ export class League extends DurableObject {
     const base = this.basePrice(p);
     if (!amount) amount = base;
     if (amount < base) bad(`La base d'asta per ${p.name} è ${base}`);
-    const mb = this.maxBid(t, p.role);
-    if (amount > mb) bad(`Puoi offrire al massimo ${mb} crediti`);
     this.run('INSERT INTO auctions(player_id,caller_team_id,status,current_bid,leader_team_id,started_at) VALUES(?,?,?,?,?,?)', p.id, t.id, 'open', amount, t.id, now());
     const aid = this.lastId();
     this.run('INSERT INTO bids(auction_id,team_id,amount,created_at) VALUES(?,?,?,?)', aid, t.id, amount, now());
@@ -404,7 +396,8 @@ export class League extends DurableObject {
     for (const o of this.q('SELECT t.* FROM teams t WHERE EXISTS (SELECT 1 FROM users u WHERE u.team_id=t.id)')) {
       let st = 'active';
       if (o.id !== t.id) {
-        if (this.cambiLeft(o) <= 0 || this.hasPendingRelease(o.id) || this.maxBid(o, p.role) < amount + minRaise) st = 'out';
+        // only coaches with cambi left take part
+        if (this.cambiLeft(o) <= 0 || this.hasPendingRelease(o.id)) st = 'out';
       }
       this.run('INSERT INTO auction_participants(auction_id,team_id,status) VALUES(?,?,?)', aid, o.id, st);
       if (st === 'active' && o.id !== t.id) active.push(o.id);
@@ -429,20 +422,9 @@ export class League extends DurableObject {
     const p = this.player(a.player_id);
     const minRaise = Math.max(1, this.N('min_raise'));
     if (!amount || amount < a.current_bid + minRaise) bad(`L'offerta minima è ${a.current_bid + minRaise}`);
-    const mb = this.maxBid(t, p.role);
-    if (amount > mb) bad(`Puoi offrire al massimo ${mb} crediti`);
     this.run('UPDATE auctions SET current_bid=?, leader_team_id=? WHERE id=?', amount, t.id, a.id);
     this.run('INSERT INTO bids(auction_id,team_id,amount,created_at) VALUES(?,?,?,?)', a.id, t.id, amount, now());
-    // teams that can no longer afford the next raise drop out automatically
-    const others = this.q("SELECT team_id FROM auction_participants WHERE auction_id=? AND status='active' AND team_id!=?", a.id, t.id);
-    const stillActive = [];
-    for (const o of others) {
-      const ot = this.team(o.team_id);
-      if (this.maxBid(ot, p.role) < amount + minRaise) {
-        this.run("UPDATE auction_participants SET status='out' WHERE auction_id=? AND team_id=?", a.id, o.team_id);
-        this.log('auction', `${ot.name} esce dall'asta per ${p.name} (crediti insufficienti)`);
-      } else stillActive.push(o.team_id);
-    }
+    const stillActive = this.q("SELECT team_id FROM auction_participants WHERE auction_id=? AND status='active' AND team_id!=?", a.id, t.id).map((o) => o.team_id);
     this.log('bid', `⬆️ ${actor} rilancia ${amount} su ${p.name}`);
     this.notifyTeams(stillActive, {
       title: `⬆️ ${p.name}: ${amount}`,
@@ -483,10 +465,11 @@ export class League extends DurableObject {
     if (a.caller_team_id !== winner.id) {
       this.notifyTeams([a.caller_team_id], { title: `${p.name} va a ${winner.name}`, body: `Aggiudicato per ${a.current_bid}. È ancora il tuo turno: chiama un altro giocatore.`, tag: 'auction-' + a.id });
     }
-    const c = this.counts(winner.id);
-    if (c[p.role] > this.lim(p.role)) {
-      this.run('INSERT INTO pending_releases(team_id,role,created_at) VALUES(?,?,?)', winner.id, p.role, now());
-      this.notifyTeams([winner.id], { title: '✂️ Devi svincolare un giocatore', body: `Hai troppi ${ROLE_NAME[p.role].toLowerCase()}: scegli chi svincolare.`, tag: 'release' });
+    this.move('acquisto', winner.id, p, a.current_bid);
+    const max = this.N('roster_max');
+    if (max && this.rosterCount(winner.id) > max) {
+      this.run('INSERT INTO pending_releases(team_id,role,created_at) VALUES(?,?,?)', winner.id, null, now());
+      this.notifyTeams([winner.id], { title: '✂️ Devi svincolare un giocatore', body: `Hai più di ${max} giocatori: scegli chi svincolare (qualsiasi ruolo). La prossima asta aspetta te.`, tag: 'release' });
     }
     if (this.turnTeamId() === winner.id) this.advanceTurn(winner.id, `${winner.name} ha acquistato ${p.name}`);
   }
@@ -532,12 +515,13 @@ export class League extends DurableObject {
   release(t, playerId, actor) {
     const p = this.player(playerId);
     if (!p || p.team_id !== t.id) bad('Il giocatore non è nella tua rosa');
-    const pr = this.one('SELECT * FROM pending_releases WHERE team_id=? AND role=? ORDER BY id LIMIT 1', t.id, p.role);
-    if (!pr) bad('Non devi svincolare giocatori in questo ruolo');
+    const pr = this.one('SELECT * FROM pending_releases WHERE team_id=? ORDER BY id LIMIT 1', t.id);
+    if (!pr) bad('Non devi svincolare giocatori');
     const refund = this.refundFor(p);
     this.run('UPDATE players SET team_id=NULL, cost=NULL, acquired_at=NULL WHERE id=?', p.id);
     if (refund) this.run('UPDATE teams SET credits=credits+? WHERE id=?', refund, t.id);
     this.run('DELETE FROM pending_releases WHERE id=?', pr.id);
+    this.move('svincolo', t.id, p, refund);
     this.log('release', `✂️ ${actor} svincola ${p.name}${refund ? ` (+${refund} crediti)` : ''}`);
     // the next auction was waiting for this release: tell whoever holds the turn
     const turn = this.turnTeamId();
@@ -573,7 +557,6 @@ export class League extends DurableObject {
     this.tradeCheckCapacity(t);
     this.tradeCheckCapacity(other);
     const credits = int(b.credits);
-    if (credits > 0 && credits > this.avail(t)) bad('Non hai abbastanza crediti');
     this.run("INSERT INTO trades(from_team_id,to_team_id,offered_player_id,requested_player_id,credits,status,note,created_at) VALUES(?,?,?,?,?,'pending',?,?)",
       t.id, other.id, offered.id, requested.id, credits, String(b.note || '').slice(0, 200), now());
     const id = this.lastId();
@@ -605,14 +588,6 @@ export class League extends DurableObject {
     if (offered.team_id !== from.id || requested.team_id !== to.id) bad('I giocatori non sono più nelle rispettive rose');
     this.tradeCheckCapacity(from);
     this.tradeCheckCapacity(to);
-    if (tr.credits > 0 && this.avail(from) < tr.credits) bad(`${from.name} non ha più abbastanza crediti`);
-    if (tr.credits < 0 && this.avail(to) < -tr.credits) bad('Non hai abbastanza crediti');
-    if (offered.role !== requested.role) {
-      const cf = this.counts(from.id); const ct = this.counts(to.id);
-      cf[offered.role]--; cf[requested.role]++; ct[requested.role]--; ct[offered.role]++;
-      if (cf[requested.role] > this.lim(requested.role)) bad(`${from.name} supererebbe il limite di ${ROLE_NAME[requested.role].toLowerCase()}`);
-      if (ct[offered.role] > this.lim(offered.role)) bad(`Supereresti il limite di ${ROLE_NAME[offered.role].toLowerCase()}`);
-    }
     this.run('UPDATE players SET team_id=? WHERE id=?', to.id, offered.id);
     this.run('UPDATE players SET team_id=? WHERE id=?', from.id, requested.id);
     if (tr.credits) {
@@ -622,6 +597,7 @@ export class League extends DurableObject {
     const col = this.tradesSeparate() ? 'scambi_used' : 'cambi_used';
     this.run(`UPDATE teams SET ${col}=${col}+1 WHERE id IN (?,?)`, from.id, to.id);
     this.run("UPDATE trades SET status='accepted', resolved_at=? WHERE id=?", now(), tr.id);
+    this.move('scambio', from.id, offered, tr.credits, to.id, requested);
     // other pending proposals involving these players are no longer valid
     for (const o of this.q("SELECT * FROM trades WHERE status='pending' AND (offered_player_id IN (?,?) OR requested_player_id IN (?,?))", offered.id, requested.id, offered.id, requested.id)) {
       this.run("UPDATE trades SET status='cancelled', resolved_at=? WHERE id=?", now(), o.id);
@@ -774,7 +750,7 @@ export class League extends DurableObject {
         return { ok: true };
       }
       case 'reset_all': {
-        for (const tb of ['teams', 'players', 'listone', 'auctions', 'auction_participants', 'bids', 'trades', 'pending_releases', 'events']) this.run(`DELETE FROM ${tb}`);
+        for (const tb of ['teams', 'players', 'listone', 'auctions', 'auction_participants', 'bids', 'trades', 'pending_releases', 'events', 'moves']) this.run(`DELETE FROM ${tb}`);
         this.run('UPDATE users SET team_id=NULL');
         this.setS('phase', 'setup'); this.setS('turn_team_id', '');
         this.log('admin', '♻️ Dati azzerati dall\'admin');
