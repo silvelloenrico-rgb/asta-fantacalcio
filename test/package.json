@@ -1,10 +1,10 @@
 {
-  "name": "test",
+  "name": "asta-cfp-tests",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node push.test.mjs && node e2e.test.mjs",
+    "test:ui": "node ui.test.mjs"
   },
   "keywords": [],
   "author": "",
@@ -13,5 +13,6 @@
     "http_ece": "^1.2.1",
     "playwright": "^1.63.0",
     "xlsx": "^0.18.5"
-  }
+  },
+  "type": "module"
 }

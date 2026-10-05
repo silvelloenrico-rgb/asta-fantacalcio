@@ -1,5 +1,7 @@
 # Asta CFP
 
+> Vuoi integrarla in un'altra app? Leggi **[INTEGRAZIONE.md](INTEGRAZIONE.md)**: è la specifica tecnica completa, scritta per essere data a un agente di programmazione.
+
 Web app per l'asta di riparazione della lega CFP. Gira interamente su Cloudflare:
 
 - **Worker** serve l'app (PWA in `public/`) e le API.
@@ -35,4 +37,4 @@ Collegato a Cloudflare Workers Builds: ogni push su `main` viene pubblicato con 
 npm install
 npx wrangler dev
 ```
-I test (`test/`) usano i file Excel reali: `flow.test.mjs` (API) e `ui.test.mjs` (Playwright).
+Test: vedi la sezione 12 di INTEGRAZIONE.md (`cd test && npm install && npm test`).

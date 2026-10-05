@@ -1,43 +1,39 @@
+// Browser test (Playwright): two coaches on two phones, realtime auction via WebSocket.
+// Needs a running server (npx wrangler dev --port 8787). Wipes data. Never run against production.
 import { chromium } from 'playwright';
-const B = 'http://localhost:8787';
-const OUT = '/tmp/claude-0/shots/'; import fs from 'fs'; fs.mkdirSync(OUT, { recursive: true });
-const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
-async function user(email, pw) {
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
-  await ctx.route(/cdnjs\.cloudflare\.com.*xlsx/, r => r.fulfill({ path: 'node_modules/xlsx/dist/xlsx.full.min.js', contentType: 'text/javascript' }));
-  await ctx.route(/fonts\.(googleapis|gstatic)/, r => r.abort());
+import XLSX from 'xlsx';
+import { parseRose, parseSvincolati } from '../public/xlsx-parse.js';
+const B = process.env.BASE_URL || 'http://localhost:8787';
+const ADMIN = { email: 'silvello.enrico@gmail.com', password: process.env.ADMIN_PASSWORD || 'secret1', name: 'Admin' };
+const jar = {};
+async function api(who, path, body) {
+  const r = await fetch(B + path, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json', cookie: jar[who] || '' }, body: body ? JSON.stringify(body) : undefined });
+  const sc = r.headers.get('set-cookie'); if (sc) jar[who] = sc.split(';')[0];
+  const j = await r.json(); if (j.error) throw new Error(j.error); return j;
+}
+try { await api('a', '/api/register', ADMIN); } catch { await api('a', '/api/login', ADMIN); }
+await api('a', '/api/admin', { type: 'reset_all' });
+await api('a', '/api/admin', { type: 'import_rose', teams: parseRose(XLSX, XLSX.readFile(new URL('./fixtures/rose-esempio.xlsx', import.meta.url).pathname)) });
+await api('a', '/api/admin', { type: 'import_listone', players: parseSvincolati(XLSX, XLSX.readFile(new URL('./fixtures/listone-esempio.xlsx', import.meta.url).pathname)) });
+const st = await api('a', '/api/state');
+for (const [i, t] of st.teams.slice(0, 2).entries()) { try { await api('c' + i, '/api/register', { email: `ui${i}@esempio.it`, name: 'Ui ' + i, password: 'password', team_id: t.id }); } catch {} }
+await api('a', '/api/admin', { type: 'start' });
+
+const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
+async function phone(email) {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await ctx.route(/fonts\.(googleapis|gstatic)/, (r) => r.abort());
   const p = await ctx.newPage();
-  p.on('pageerror', e => console.log('PAGEERROR', email, e.message));
-  p.on('console', m => { if (m.type() === 'error' && !m.text().includes('fonts')) console.log('CONSOLE', email, m.text()); });
-  await p.goto(B);
-  await p.fill('input[name=email]', email); await p.fill('input[name=password]', pw);
+  p.on('pageerror', (e) => { console.log('ERRORE JS', e.message); process.exitCode = 1; });
+  await p.goto(B); await p.fill('input[name=email]', email); await p.fill('input[name=password]', 'password');
   await p.click('button[type=submit]'); await p.waitForSelector('nav.tabs');
   return p;
 }
-const shot = (p, n) => p.screenshot({ path: OUT + n + '.png', fullPage: false });
-// login page screenshot
-{ const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); const p = await ctx.newPage(); await p.goto(B); await p.click('[data-auth=register]'); await p.waitForTimeout(300); await shot(p, '00-register'); }
-const bubble = await user('u3@x.it', 'pwpwpw'); // Bubble Cheese = 3rd team, u2 (i starts at 1 skipping Real Paese) 
-const name = await bubble.textContent('.brand small'); console.log('u2 team:', name);
-const diva = await user('u4@x.it', 'pwpwpw');
-console.log('u3 team:', await diva.textContent('.brand small'));
-const admin = await user('silvello.enrico@gmail.com', 'secret1');
-await shot(bubble, '01-turno');
-// Bubble calls a player via UI
-await bubble.click('[data-tab=svincolati]');
-await bubble.fill('#search', 'bartes'); await bubble.waitForTimeout(200);
-await shot(bubble, '02-svincolati');
-await bubble.click('[data-call]'); await bubble.fill('#openbid', '3'); await shot(bubble, '03-chiama');
-await bubble.click('#docall'); await bubble.waitForTimeout(600);
-await shot(bubble, '04-leader');
-await diva.waitForSelector('.auction', { timeout: 5000 }); // realtime via websocket
-await shot(diva, '05-asta-live-diva');
-await diva.click('[data-raise]'); await diva.waitForTimeout(500);
-await bubble.waitForFunction(() => document.querySelector('.bid .amt')?.textContent === '4', null, { timeout: 5000 });
-console.log('realtime raise visible to bubble: OK');
-await shot(admin, '06-admin-asta');
-await admin.click('[data-tab=admin]'); await admin.waitForTimeout(300);
-await admin.screenshot({ path: OUT + '07-admin.png', fullPage: true });
-await diva.click('[data-tab=rose]'); await diva.click('.tcard >> nth=0'); await diva.waitForTimeout(200);
-await shot(diva, '08-rosa');
+const a = await phone('ui0@esempio.it'), b = await phone('ui1@esempio.it');
+await a.click('[data-tab=svincolati]'); await a.click('[data-call] >> nth=0'); await a.click('#docall');
+await b.waitForSelector('.auction', { timeout: 5000 }); console.log('✔ B vede l\'asta aperta da A in tempo reale');
+await b.click('[data-raise] >> nth=0');
+await a.waitForFunction(() => document.querySelector('.bid .amt')?.textContent === '2', null, { timeout: 5000 }); console.log('✔ A vede il rilancio di B in tempo reale');
+for (const t of ['rose', 'movimenti', 'log']) { await a.click(`[data-tab=${t}]`); await a.waitForTimeout(200); }
+console.log('✔ tutte le sezioni si aprono senza errori');
 await browser.close();
